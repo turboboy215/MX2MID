@@ -1,0 +1,722 @@
+/*MusyX (GBC) to MIDI converter*/
+/*By Will Trowbridge*/
+/*Portions based on code by ValleyBell*/
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <stddef.h>
+#include "HEADER.H"
+
+#define bankSize 16384
+
+struct header wavHeader;
+
+FILE* rom, * mid, * wav;
+long bank;
+long offset;
+long tablePtrLoc;
+long tableOffset;
+int i, j;
+char outfile[1000000];
+int songNum;
+int numSongs;
+int sampNum;
+int numSamp;
+int mode = 1;
+long bankAmt;
+int foundTable = 0;
+int curMask = 0;
+int masterBank = 0;
+
+long asdrTab;
+long sfxTab;
+int numSfx;
+long samTab;
+int sampMap;
+long numSampMap;
+long songTab;
+int curInst = 0;
+int curVol = 100;
+long sampPtr = 0;
+long sampSize = 0;
+int sampQ = 0;
+
+char* argv3;
+
+unsigned static char* romData;
+unsigned static char* exRomData;
+unsigned static char* midData;
+unsigned static char* ctrlMidData;
+
+long midLength;
+
+const char MagicBytes[6] = { 0xAF, 0xC9, 0xFC, 0xF3, 0xCF, 0x3F };
+
+/*Function prototypes*/
+unsigned short ReadLE16(unsigned char* Data);
+unsigned short ReadBE16(unsigned char* Data);
+static void Write8B(unsigned char* buffer, unsigned int value);
+static void WriteBE32(unsigned char* buffer, unsigned long value);
+static void WriteBE24(unsigned char* buffer, unsigned long value);
+static void WriteBE16(unsigned char* buffer, unsigned int value);
+unsigned int WriteNoteEvent(unsigned static char* buffer, unsigned int pos, unsigned int note, int length, int delay, int firstNote, int curChan, int inst);
+int WriteDeltaTime(unsigned static char* buffer, unsigned int pos, unsigned int value);
+void song2mid(int songNum, int bank, long ptr);
+void sam2wav(int sampNum, long ptr, long size, int bank, int quality);
+
+/*Convert little-endian pointer to big-endian*/
+unsigned short ReadLE16(unsigned char* Data)
+{
+	return (Data[0] << 0) | (Data[1] << 8);
+}
+
+/*Store big-endian pointer*/
+unsigned short ReadBE16(unsigned char* Data)
+{
+	return (Data[0] << 8) | (Data[1] << 0);
+}
+
+static void Write8B(unsigned char* buffer, unsigned int value)
+{
+	buffer[0x00] = value;
+}
+
+static void WriteBE32(unsigned char* buffer, unsigned long value)
+{
+	buffer[0x00] = (value & 0xFF000000) >> 24;
+	buffer[0x01] = (value & 0x00FF0000) >> 16;
+	buffer[0x02] = (value & 0x0000FF00) >> 8;
+	buffer[0x03] = (value & 0x000000FF) >> 0;
+
+	return;
+}
+
+static void WriteBE24(unsigned char* buffer, unsigned long value)
+{
+	buffer[0x00] = (value & 0xFF0000) >> 16;
+	buffer[0x01] = (value & 0x00FF00) >> 8;
+	buffer[0x02] = (value & 0x0000FF) >> 0;
+
+	return;
+}
+
+static void WriteBE16(unsigned char* buffer, unsigned int value)
+{
+	buffer[0x00] = (value & 0xFF00) >> 8;
+	buffer[0x01] = (value & 0x00FF) >> 0;
+
+	return;
+}
+
+unsigned int WriteNoteEvent(unsigned static char* buffer, unsigned int pos, unsigned int note, int length, int delay, int firstNote, int curChan, int inst)
+{
+	int deltaValue;
+	deltaValue = WriteDeltaTime(buffer, pos, delay);
+	pos += deltaValue;
+
+	if (firstNote == 1)
+	{
+		Write8B(&buffer[pos], 0xC0 | curChan);
+
+		Write8B(&buffer[pos + 1], inst);
+		Write8B(&buffer[pos + 2], 0);
+
+		Write8B(&buffer[pos + 3], 0x90 | curChan);
+
+		pos += 4;
+	}
+
+	Write8B(&buffer[pos], note);
+	pos++;
+	Write8B(&buffer[pos], curVol);
+	pos++;
+
+	deltaValue = WriteDeltaTime(buffer, pos, length);
+	pos += deltaValue;
+
+	Write8B(&buffer[pos], note);
+	pos++;
+	Write8B(&buffer[pos], 0);
+	pos++;
+
+	return pos;
+
+}
+
+int WriteDeltaTime(unsigned static char* buffer, unsigned int pos, unsigned int value)
+{
+	unsigned char valSize;
+	unsigned char* valData;
+	unsigned int tempLen;
+	unsigned int curPos;
+
+	valSize = 0;
+	tempLen = value;
+
+	while (tempLen != 0)
+	{
+		tempLen >>= 7;
+		valSize++;
+	}
+
+	valData = &buffer[pos];
+	curPos = valSize;
+	tempLen = value;
+
+	while (tempLen != 0)
+	{
+		curPos--;
+		valData[curPos] = 128 | (tempLen & 127);
+		tempLen >>= 7;
+	}
+
+	valData[valSize - 1] &= 127;
+
+	pos += valSize;
+
+	if (value == 0)
+	{
+		valSize = 1;
+	}
+	return valSize;
+}
+
+int main(int args, char* argv[])
+{
+	printf("MusyX (GBC) to MIDI converter\n");
+	if (args < 3)
+	{
+		printf("Usage: MX2MID <rom> <bank> <parameter>\n");
+		printf("Parameters: M = extract music (default), S = extract samples\n");
+		return -1;
+	}
+	else
+	{
+		if (args == 3)
+		{
+			mode = 1;
+		}
+		else
+		{
+			argv3 = argv[3];
+			/*Extract music to MIDI*/
+			if (strcmp(argv3, "m") == 0 || strcmp(argv3, "M") == 0)
+			{
+				mode = 1;
+			}
+
+			/*Extract samples*/
+			else if (strcmp(argv3, "s") == 0 || strcmp(argv3, "S") == 0)
+			{
+				mode = 2;
+			}
+			else
+			{
+				printf("ERROR: Invalid mode switch!\n");
+				exit(1);
+			}
+		}
+		if ((rom = fopen(argv[1], "rb")) == NULL)
+		{
+			printf("ERROR: Unable to open file %s!\n", argv[1]);
+			exit(1);
+		}
+		else
+		{
+			masterBank = strtol(argv[2], NULL, 16);
+			bankAmt = bankSize;
+
+			fseek(rom, ((masterBank - 1) * bankSize), SEEK_SET);
+			romData = (unsigned char*)malloc(bankSize);
+			fread(romData, 1, bankSize, rom);
+
+			/*Try to search the bank for song table loader - Method 1: Mega Man 3/Bionic Commando*/
+			for (i = 0; i < bankSize; i++)
+			{
+				if ((!memcmp(&romData[i], MagicBytes, 6)) && foundTable != 1)
+				{
+					tableOffset = i + 6 + bankAmt;
+					printf("Found project data at address 0x%04x!\n", tableOffset);
+					foundTable = 1;
+				}
+			}
+
+			if (foundTable == 1)
+			{
+
+				/*Get the MusyX project data parameters*/
+				i = tableOffset - bankAmt;
+				asdrTab = ReadLE16(&romData[i]) + tableOffset;
+				printf("ASDR table address: 0x%04X\n", asdrTab);
+				i += 2;
+				sfxTab = ReadLE16(&romData[i]) + tableOffset;
+				printf("Sound effect table address: 0x%04X\n", sfxTab);
+				i += 2;
+				numSfx = romData[i];
+				printf("Number of sound effects: %i\n", numSfx);
+				i++;
+				samTab = ReadLE16(&romData[i]) + tableOffset;
+				printf("Sample table address: 0x%04X\n", samTab);
+				i += 2;
+				numSamp = romData[i];
+				printf("Number of samples: %i\n", numSamp);
+				/*Additionally skip an "empty" 1-byte parameter*/
+				i += 2;
+				sampMap = ReadLE16(&romData[i]) + tableOffset;
+				printf("Sample map address: 0x%04X\n", sampMap);
+				i += 2;
+				printf("Number of entires in sample map: %i\n", numSampMap);
+				i++;
+				songTab = ReadLE16(&romData[i]) + tableOffset;
+				printf("Song table address: 0x%04X\n", songTab);
+				i += 2;
+				numSongs = romData[i];
+				printf("Number of songs: %i\n", numSongs);
+
+				if (mode == 1)
+				{
+					/*Now convert all the songs*/
+					i = songTab - bankAmt;
+					for (songNum = 1; songNum <= numSongs; songNum++)
+					{
+						bank = romData[i] + masterBank;
+						offset = ReadLE16(&romData[i + 1]);
+						printf("Song %i: bank %01X, address 0x%04X\n", songNum, bank, offset);
+						song2mid(songNum, bank, offset);
+						i += 3;
+					}
+				}
+
+				else if (mode == 2)
+				{
+					/*Extract all the samples*/
+					i = samTab - bankAmt;
+					for (sampNum = 1; sampNum <= numSamp; sampNum++)
+					{
+						sampPtr = ReadLE16(&romData[i]);
+						sampSize = ReadLE16(&romData[i + 2]) * 0x10;
+						sampQ = romData[i + 4];
+						bank = romData[i + 5] + masterBank;
+						printf("Sample %i: offset: 0x%04X, size: %01X, quality: %01X, bank: %01X\n", sampNum, sampPtr, sampSize, sampQ, bank);
+						sam2wav(sampNum, sampPtr, sampSize, bank, sampQ);
+						i += 6;
+
+					}
+				}
+
+
+				printf("The operation was succesfully completed!\n");
+				exit(0);
+			}
+			else
+			{
+				printf("ERROR: Magic bytes not found!\n");
+				exit(-1);
+			}
+
+		}
+	}
+}
+
+void song2mid(int songNum, int bank, long ptr)
+{
+	static const char* TRK_NAMES[4] = { "Square 1", "Square 2", "Wave", "Noise" };
+	int seqPos = 0;
+	int patPos = 0;
+	int numPat = 0;
+	int numTracks = 0;
+	int curTrack = 0;
+	int trackCnt = 4;
+	int seqEnd = 0;
+	int chanEnd = 0;
+	int curNote = 0;
+	int curNoteLen = 0;
+	long curDelay = 0;
+	long ctrlDelay = 0;
+	int curVel = 0;
+	int tempo = 150;
+	int k = 0;
+	int activeChan[4] = { 0, 0, 0, 0 };
+	unsigned char command[4];
+	int ticks = 24;
+	int firstNote = 1;
+	unsigned int midPos = 0;
+	unsigned int ctrlMidPos = 0;
+	long midTrackBase = 0;
+	long ctrlMidTrackBase = 0;
+	int valSize = 0;
+	long trackSize = 0;
+	long patBase = 0;
+	long trackTab = 0;
+	long patTab = 0;
+	long patterns[4];
+
+	long tempPos = 0;
+	int holdNote = 0;
+	long startPos = 0;
+	long ptrPos = 0;
+	int progC = 0;
+	int noteL = 0;
+
+
+	midPos = 0;
+	ctrlMidPos = 0;
+
+	midLength = 0x10000;
+	midData = (unsigned char*)malloc(midLength);
+
+	ctrlMidData = (unsigned char*)malloc(midLength);
+
+	for (j = 0; j < midLength; j++)
+	{
+		midData[j] = 0;
+		ctrlMidData[j] = 0;
+	}
+
+	sprintf(outfile, "song%i.mid", songNum);
+	if ((mid = fopen(outfile, "wb")) == NULL)
+	{
+		printf("ERROR: Unable to write to file song%i.mid!\n", songNum);
+		exit(2);
+	}
+	else
+	{
+		/*Copy the song data's bank*/
+		fseek(rom, ((bank - 1) * bankSize), SEEK_SET);
+		exRomData = (unsigned char*)malloc(bankSize);
+		fread(exRomData, 1, bankSize, rom);
+
+		/*Go to the song's position*/
+		patPos = ptr - bankAmt;
+
+		/*Get header information*/
+		command[0] = exRomData[patPos];
+		command[1] = exRomData[patPos + 1];
+		command[2] = exRomData[patPos + 2];
+		command[3] = exRomData[patPos + 3];
+
+		/*Skip header bytes (channel mapping)*/
+		patPos += 0x84;
+		patBase = patPos;
+		trackTab = ReadBE16(&exRomData[patPos]);
+		patPos += 2;
+		patTab = ReadBE16(&exRomData[patPos]);
+		patPos += 2;
+		tempo = ReadBE16(&exRomData[patPos]);
+		patPos += 2;
+
+		/*Write MIDI header with "MThd"*/
+		WriteBE32(&ctrlMidData[ctrlMidPos], 0x4D546864);
+		WriteBE32(&ctrlMidData[ctrlMidPos + 4], 0x00000006);
+		ctrlMidPos += 8;
+
+		WriteBE16(&ctrlMidData[ctrlMidPos], 0x0001);
+		WriteBE16(&ctrlMidData[ctrlMidPos + 2], trackCnt + 1);
+		WriteBE16(&ctrlMidData[ctrlMidPos + 4], ticks);
+		ctrlMidPos += 6;
+		/*Write initial MIDI information for "control" track*/
+		WriteBE32(&ctrlMidData[ctrlMidPos], 0x4D54726B);
+		ctrlMidPos += 8;
+		ctrlMidTrackBase = ctrlMidPos;
+
+		/*Set channel name (blank)*/
+		WriteDeltaTime(ctrlMidData, ctrlMidPos, 0);
+		ctrlMidPos++;
+		WriteBE16(&ctrlMidData[ctrlMidPos], 0xFF03);
+		Write8B(&ctrlMidData[ctrlMidPos + 2], 0);
+		ctrlMidPos += 2;
+
+
+		/*Set initial tempo*/
+		WriteDeltaTime(ctrlMidData, ctrlMidPos, 0);
+		ctrlMidPos++;
+		WriteBE32(&ctrlMidData[ctrlMidPos], 0xFF5103);
+		ctrlMidPos += 4;
+
+		WriteBE24(&ctrlMidData[ctrlMidPos], 60000000 / tempo);
+		ctrlMidPos += 3;
+
+		/*Set time signature*/
+		WriteDeltaTime(ctrlMidData, ctrlMidPos, 0);
+		ctrlMidPos++;
+		WriteBE24(&ctrlMidData[ctrlMidPos], 0xFF5804);
+		ctrlMidPos += 3;
+		WriteBE32(&ctrlMidData[ctrlMidPos], 0x04021808);
+		ctrlMidPos += 4;
+
+		/*Set key signature*/
+		WriteDeltaTime(ctrlMidData, ctrlMidPos, 0);
+		ctrlMidPos++;
+		WriteBE24(&ctrlMidData[ctrlMidPos], 0xFF5902);
+		ctrlMidPos += 4;
+
+		/*Get the track pattern pointers*/
+		for (curTrack = 0; curTrack < 4; curTrack++)
+		{
+			patPos = patBase + trackTab + (2 * curTrack);
+			patterns[curTrack] = ReadBE16(&exRomData[patPos]);
+			patPos += 2;
+		}
+
+		for (curTrack = 0; curTrack < trackCnt; curTrack++)
+		{
+			firstNote = 1;
+			curDelay = 0;
+			ctrlDelay = 0;
+			curNoteLen = 0;
+			/*Write MIDI chunk header with "MTrk"*/
+			WriteBE32(&midData[midPos], 0x4D54726B);
+			midPos += 8;
+			midTrackBase = midPos;
+
+			/*Add track header*/
+			valSize = WriteDeltaTime(midData, midPos, 0);
+			midPos += valSize;
+			WriteBE16(&midData[midPos], 0xFF03);
+			midPos += 2;
+			Write8B(&midData[midPos], strlen(TRK_NAMES[curTrack]));
+			midPos++;
+			sprintf((char*)&midData[midPos], TRK_NAMES[curTrack]);
+			midPos += strlen(TRK_NAMES[curTrack]);
+
+			/*Calculate MIDI channel size*/
+			trackSize = midPos - midTrackBase;
+			WriteBE16(&midData[midTrackBase - 2], trackSize);
+
+			if (patterns[curTrack] == 0x0000)
+			{
+				chanEnd = 1;
+			}
+			
+			else
+			{
+				chanEnd = 0;
+				patPos = patBase + patterns[curTrack];
+				while (chanEnd == 0)
+				{
+					if (exRomData[patPos + 2] < 0xFE)
+					{
+						curNoteLen = 0;
+						curDelay = ReadBE16(&exRomData[patPos]) - ctrlDelay;
+						numPat = exRomData[patPos + 2];
+						ptrPos = patBase + patTab + (numPat * 2);
+						seqPos = ReadBE16(&exRomData[ptrPos]) + patBase;
+						seqEnd = 0;
+					}
+					else
+					{
+						chanEnd = 1;
+					}
+
+					while (seqEnd == 0)
+					{
+						command[0] = exRomData[seqPos];
+						command[1] = exRomData[seqPos + 1];
+						command[2] = exRomData[seqPos + 2];
+						command[3] = exRomData[seqPos + 3];
+
+						/*Rest*/
+						if (command[0] == 0x00)
+						{
+							curDelay += (command[1] - curNoteLen);
+							ctrlDelay += (command[1] - curNoteLen);
+							seqPos += 2;
+
+							/*Is there a program change?*/
+							command[0] = exRomData[seqPos];
+							progC = command[0] & 0x80;
+
+							if (progC == 0x80)
+							{
+								curInst = command[0] & 0x7F;
+								firstNote = 1;
+								seqPos++;
+							}
+						}
+
+						/*End of pattern/sequence*/
+						else if (command[0] == 0xF0 && command[1] == 0x00 && command[2] == 0xFF)
+						{
+							seqEnd = 1;
+							patPos += 3;
+						}
+
+						/*Play note*/
+						else
+						{
+							progC = 0;
+							noteL = 0;
+
+							/*Get the velocity/volume of the note*/
+							curVel = command[0] & 0xF0;
+							curVol = curVel * 0.4;
+
+							/*Get the note's timing/delay*/
+							curDelay += (command[1] + ((command[0] & 0x0F) * 0x100)) - curNoteLen;
+							ctrlDelay += (command[1] + ((command[0] & 0x0F) * 0x100)) - curNoteLen;
+
+							seqPos += 2;
+
+							command[0] = exRomData[seqPos];
+							/*Get the current note*/
+							progC = command[0] & 0x80;
+							curNote = command[0] & 0x7F;
+
+							/*Is there a program change?*/
+							if (progC == 0x80)
+							{
+								seqPos++;
+								command[0] = exRomData[seqPos];
+								curInst = command[0];
+								firstNote = 1;
+							}
+
+							seqPos++;
+							command[0] = exRomData[seqPos];
+							command[1] = exRomData[seqPos + 1];
+							/*Get the current note's length*/
+							noteL = command[0] & 0x80;
+
+							if (noteL == 0x80)
+							{
+								/*Go to loop pattern*/
+								if (command[0] == 0xFE)
+								{
+									curNoteLen = command[1] & 0x7F;
+									seqPos++;
+								}
+								else
+								{
+									curNoteLen = command[1] + ((command[0] & 0x15) * 0x100);
+									seqPos++;
+								}
+							}
+
+							else
+							{
+								curNoteLen = command[0];
+							}
+
+							tempPos = WriteNoteEvent(midData, midPos, curNote, curNoteLen, curDelay, firstNote, curTrack, curInst);
+							firstNote = 0;
+							midPos = tempPos;
+							ctrlDelay += curNoteLen;
+							curDelay = 0;
+							seqPos++;
+
+						}
+					}
+				}
+			}
+			/*End of track*/
+			WriteBE32(&midData[midPos], 0xFF2F00);
+			midPos += 4;
+
+			/*Calculate MIDI channel size*/
+			trackSize = midPos - midTrackBase;
+			WriteBE16(&midData[midTrackBase - 2], trackSize);
+		}
+		/*End of control track*/
+		ctrlMidPos++;
+		WriteBE32(&ctrlMidData[ctrlMidPos], 0xFF2F00);
+		ctrlMidPos += 4;
+
+		/*Calculate MIDI channel size*/
+		trackSize = ctrlMidPos - ctrlMidTrackBase;
+		WriteBE16(&ctrlMidData[ctrlMidTrackBase - 2], trackSize);
+
+		sprintf(outfile, "song%d.mid", songNum);
+		fwrite(ctrlMidData, ctrlMidPos, 1, mid);
+		fwrite(midData, midPos, 1, mid);
+		fclose(mid);
+	}
+}
+
+void sam2wav(int sampNum, long ptr, long size, int bank, int quality)
+{
+	int sampPos = 0;
+	int rawPos = 0;
+	int k = 0;
+	int c = 0;
+	int s = 0;
+	int fileSize = 0;
+	int sampleRate = 8192;
+	unsigned char lowNibble = 0;
+	unsigned char highNibble = 0;
+	unsigned static char* rawData;
+	int rawLength = 0x10000;
+
+	sprintf(outfile, "sample%i.wav", sampNum);
+	if ((wav = fopen(outfile, "wb")) == NULL)
+	{
+		printf("ERROR: Unable to write to file sample%i.wav!\n", sampNum);
+		exit(2);
+	}
+	else
+	{
+		/*Copy the sample data's bank (x 2)*/
+		fseek(rom, ((bank - 1) * bankSize), SEEK_SET);
+		exRomData = (unsigned char*)malloc(bankSize * 2);
+		fread(exRomData, 1, bankSize, rom);
+
+		/*Create a storage for the extracted and unpacked sample data*/
+		rawData = (unsigned char*)malloc(rawLength);
+
+		for (k = 0; k < rawLength; k++)
+		{
+			rawData[k] = 0;
+		}
+		rawPos = 0;
+
+
+		/*Go to the sample's position*/
+		sampPos = ptr - bankAmt;
+
+		for (k = 0; k < size; k++)
+		{
+			c = exRomData[sampPos];
+
+			/*Convert the 4-bit PCM to 8-bit*/
+			lowNibble = c >> 4;
+			highNibble = c & 15;
+			s = (lowNibble | (lowNibble * 0x10));
+			rawData[rawPos] = s;
+			rawPos++;
+			s = (highNibble | (highNibble * 0x10));
+			rawData[rawPos] = s;
+			rawPos++;
+			sampPos++;
+		}
+
+		if (quality == 0)
+		{
+			sampleRate = 1920;
+		}
+		else
+		{
+			sampleRate = 8192;
+		}
+
+		/*Fill in the header data*/
+		memcpy(wavHeader.riffID, "RIFF", 4);
+		memcpy(wavHeader.waveID, "WAVE", 4);
+		memcpy(wavHeader.fmtID, "fmt ", 4);
+		memcpy(wavHeader.dataID, "data", 4);
+
+		wavHeader.fileSize = rawPos + 36;
+		wavHeader.blockAlign = 16;
+		wavHeader.dataFmt = 1;
+		wavHeader.channels = 1;
+		wavHeader.sampleRate = sampleRate;
+		wavHeader.byteRate = sampleRate * 1 * 8 / 8;
+		wavHeader.bytesPerSamp = 1 * 8 / 8;
+		wavHeader.bits = 8;
+		wavHeader.dataSize = rawPos + 36;
+
+		/*Write the WAV header to the WAV file*/
+		fwrite(&wavHeader, sizeof(wavHeader), 1, wav);
+		fwrite(rawData, rawPos, 1, wav);
+		fclose(wav);
+	}
+}
