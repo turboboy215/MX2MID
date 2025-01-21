@@ -61,7 +61,10 @@ static void WriteBE32(unsigned char* buffer, unsigned long value);
 static void WriteBE24(unsigned char* buffer, unsigned long value);
 static void WriteBE16(unsigned char* buffer, unsigned int value);
 unsigned int WriteNoteEvent(unsigned static char* buffer, unsigned int pos, unsigned int note, int length, int delay, int firstNote, int curChan, int inst);
+unsigned int WriteNoteEventOn(unsigned static char* buffer, unsigned int pos, unsigned int note, int length, int delay, int firstNote, int curChan, int inst);
+unsigned int WriteNoteEventOff(unsigned static char* buffer, unsigned int pos, unsigned int note, int length, int delay, int firstNote, int curChan, int inst);
 int WriteDeltaTime(unsigned static char* buffer, unsigned int pos, unsigned int value);
+int compare(const void* a, const void* b);
 void song2mid(int songNum, int bank, long ptr);
 void sam2wav(int sampNum, long ptr, long size, int bank, int quality);
 
@@ -144,6 +147,50 @@ unsigned int WriteNoteEvent(unsigned static char* buffer, unsigned int pos, unsi
 
 }
 
+unsigned int WriteNoteEventOn(unsigned static char* buffer, unsigned int pos, unsigned int note, int length, int delay, int firstNote, int curChan, int inst)
+{
+	int deltaValue;
+	deltaValue = WriteDeltaTime(buffer, pos, delay);
+	pos += deltaValue;
+
+	if (firstNote == 1)
+	{
+		Write8B(&buffer[pos], 0xC0 | curChan);
+
+		Write8B(&buffer[pos + 1], inst);
+		Write8B(&buffer[pos + 2], 0);
+
+		Write8B(&buffer[pos + 3], 0x90 | curChan);
+
+		pos += 4;
+	}
+
+	Write8B(&buffer[pos], note);
+	pos++;
+	Write8B(&buffer[pos], curVol);
+	pos++;
+
+	return pos;
+
+}
+
+unsigned int WriteNoteEventOff(unsigned static char* buffer, unsigned int pos, unsigned int note, int length, int delay, int firstNote, int curChan, int inst)
+{
+	int deltaValue;
+
+	deltaValue = WriteDeltaTime(buffer, pos, delay);
+	pos += deltaValue;
+
+	Write8B(&buffer[pos], note);
+	pos++;
+	Write8B(&buffer[pos], 0);
+	pos++;
+
+	return pos;
+
+}
+
+
 int WriteDeltaTime(unsigned static char* buffer, unsigned int pos, unsigned int value)
 {
 	unsigned char valSize;
@@ -180,6 +227,15 @@ int WriteDeltaTime(unsigned static char* buffer, unsigned int pos, unsigned int 
 		valSize = 1;
 	}
 	return valSize;
+}
+
+int compare(const void *a, const void *b) {
+    /*Cast the void pointers to the appropriate type*/
+    const int (*rowA)[3] = a;
+    const int (*rowB)[3] = b;
+
+    /*Compare the third elements (index 2) of the rows*/
+    return (*rowA)[1] - (*rowB)[1];
 }
 
 int main(int args, char* argv[])
@@ -231,7 +287,7 @@ int main(int args, char* argv[])
 			romData = (unsigned char*)malloc(bankSize);
 			fread(romData, 1, bankSize, rom);
 
-			/*Try to search the bank for song table loader - Method 1: Mega Man 3/Bionic Commando*/
+			/*Try to search the bank for song table loader*/
 			for (i = 0; i < bankSize; i++)
 			{
 				if ((!memcmp(&romData[i], MagicBytes, 6)) && foundTable != 1)
@@ -337,6 +393,7 @@ void song2mid(int songNum, int bank, long ptr)
 	int curVel = 0;
 	int tempo = 150;
 	int k = 0;
+	int l = 0;
 	int activeChan[4] = { 0, 0, 0, 0 };
 	unsigned char command[4];
 	int ticks = 24;
@@ -358,6 +415,25 @@ void song2mid(int songNum, int bank, long ptr)
 	long ptrPos = 0;
 	int progC = 0;
 	int noteL = 0;
+
+	int prevDelay = 0;
+	int prevLen = 0;
+	int lastTime = 0;
+	int tempTime = 0;
+	int nextDelay = 0;
+	int nextLen = 0;
+	int delayVal = 0;
+	int patDelay = 0;
+	int finalNote = 0;
+	int tempDelay = 0;
+	int curPatDelay = 0;
+	int tempLen = 0;
+	int totalTDelay = 0;
+
+	int noteOffs[15][3];
+	int noteOffPos = 0;
+	long tempCtrlDelay = 0;
+	int firstFlag = 0;
 
 
 	midPos = 0;
@@ -465,20 +541,31 @@ void song2mid(int songNum, int bank, long ptr)
 			curDelay = 0;
 			ctrlDelay = 0;
 			curNoteLen = 0;
+			patDelay = 0;
+			prevDelay = 0;
+			prevLen = 0;
+			noteOffPos = 0;
+			curPatDelay = 0;
+			tempLen = 0;
+			firstFlag = 0;
 			/*Write MIDI chunk header with "MTrk"*/
 			WriteBE32(&midData[midPos], 0x4D54726B);
 			midPos += 8;
 			midTrackBase = midPos;
 
 			/*Add track header*/
+			/*
 			valSize = WriteDeltaTime(midData, midPos, 0);
 			midPos += valSize;
+
+			
 			WriteBE16(&midData[midPos], 0xFF03);
 			midPos += 2;
 			Write8B(&midData[midPos], strlen(TRK_NAMES[curTrack]));
 			midPos++;
 			sprintf((char*)&midData[midPos], TRK_NAMES[curTrack]);
 			midPos += strlen(TRK_NAMES[curTrack]);
+			*/
 
 			/*Calculate MIDI channel size*/
 			trackSize = midPos - midTrackBase;
@@ -488,9 +575,16 @@ void song2mid(int songNum, int bank, long ptr)
 			{
 				chanEnd = 1;
 			}
-			
+
 			else
 			{
+
+				for (l = 0; l < 15; l++)
+				{
+					noteOffs[l][0] = -1;
+					noteOffs[l][1] = -1;
+					noteOffs[l][2] = -1;
+				}
 				chanEnd = 0;
 				patPos = patBase + patterns[curTrack];
 				while (chanEnd == 0)
@@ -498,11 +592,16 @@ void song2mid(int songNum, int bank, long ptr)
 					if (exRomData[patPos + 2] < 0xFE)
 					{
 						curNoteLen = 0;
-						curDelay = ReadBE16(&exRomData[patPos]) - ctrlDelay;
+
+						patDelay = ReadBE16(&exRomData[patPos]) - curPatDelay;
+						curDelay = ReadBE16(&exRomData[patPos]) - curPatDelay;
+
 						numPat = exRomData[patPos + 2];
 						ptrPos = patBase + patTab + (numPat * 2);
 						seqPos = ReadBE16(&exRomData[ptrPos]) + patBase;
+						curPatDelay = 0;
 						seqEnd = 0;
+						nextDelay = 0;
 					}
 					else
 					{
@@ -519,8 +618,8 @@ void song2mid(int songNum, int bank, long ptr)
 						/*Rest*/
 						if (command[0] == 0x00)
 						{
-							curDelay += (command[1] - curNoteLen);
-							ctrlDelay += (command[1] - curNoteLen);
+							delayVal = command[1];
+							curPatDelay += command[1];
 							seqPos += 2;
 
 							/*Is there a program change?*/
@@ -538,6 +637,28 @@ void song2mid(int songNum, int bank, long ptr)
 						/*End of pattern/sequence*/
 						else if (command[0] == 0xF0 && command[1] == 0x00 && command[2] == 0xFF)
 						{
+							qsort(noteOffs, 15, sizeof(noteOffs[0]), compare);
+							firstFlag = 0;
+							for (l = 0; l < 15; l++)
+							{
+								if (noteOffs[l][1] != -1)
+								{
+									tempLen = noteOffs[l][1] - ctrlDelay;
+									if (firstFlag == 1)
+									{
+										tempLen = noteOffs[l][1] - totalTDelay;
+									}
+									totalTDelay = noteOffs[l][1];
+									tempPos = WriteNoteEventOff(midData, midPos, noteOffs[l][0], curNoteLen, tempLen, firstNote, curTrack, curInst);
+									midPos = tempPos;
+									ctrlDelay = noteOffs[l][1];
+									curPatDelay += tempLen;
+									noteOffs[l][0] = -1;
+									noteOffs[l][1] = -1;
+									noteOffs[l][2] = -1;
+									firstFlag = 1;
+								}
+							}
 							seqEnd = 1;
 							patPos += 3;
 						}
@@ -553,8 +674,7 @@ void song2mid(int songNum, int bank, long ptr)
 							curVol = curVel * 0.4;
 
 							/*Get the note's timing/delay*/
-							curDelay += (command[1] + ((command[0] & 0x0F) * 0x100)) - curNoteLen;
-							ctrlDelay += (command[1] + ((command[0] & 0x0F) * 0x100)) - curNoteLen;
+							delayVal = command[1] + ((command[0] & 0x0F) * 0x100);
 
 							seqPos += 2;
 
@@ -577,7 +697,6 @@ void song2mid(int songNum, int bank, long ptr)
 							command[1] = exRomData[seqPos + 1];
 							/*Get the current note's length*/
 							noteL = command[0] & 0x80;
-
 							if (noteL == 0x80)
 							{
 								/*Go to loop pattern*/
@@ -598,11 +717,113 @@ void song2mid(int songNum, int bank, long ptr)
 								curNoteLen = command[0];
 							}
 
-							tempPos = WriteNoteEvent(midData, midPos, curNote, curNoteLen, curDelay, firstNote, curTrack, curInst);
+							nextDelay = ReadBE16(&exRomData[seqPos + 1]) & 0x7F;
+							if (exRomData[seqPos + 3] >= 0x80)
+							{
+								if (exRomData[seqPos + 5] >= 0x80)
+								{
+									nextLen = ReadBE16(&exRomData[seqPos + 5]) & 0x7F;
+								}
+								else
+								{
+									nextLen = exRomData[seqPos + 5];
+								}
+							}
+							else
+							{
+								if (exRomData[seqPos + 4] >= 0x80)
+								{
+									nextLen = ReadBE16(&exRomData[seqPos + 4]) & 0x7F;
+								}
+								else
+								{
+									nextLen = exRomData[seqPos + 4];
+								}
+							}
+
+							if (exRomData[seqPos + 1] == 0xF0 && exRomData[seqPos + 2] == 0x00 && exRomData[seqPos + 3] == 0xF0)
+							{
+								nextDelay = 0;
+							}
+
+
+							curDelay = delayVal + patDelay;
+							ctrlDelay += delayVal + patDelay;
+
+							curPatDelay += delayVal;
+
+							tempCtrlDelay = ctrlDelay;
+							totalTDelay = 0;
+
+							qsort(noteOffs, 15, sizeof(noteOffs[0]), compare);
+
+							for (l = 0; l < 15; l++)
+							{
+								
+								if (tempCtrlDelay >= noteOffs[l][1] && noteOffs[l][1] > 0)
+								{
+										tempDelay = ctrlDelay - noteOffs[l][1];
+										tempLen = curDelay - tempDelay;
+
+										if (firstFlag == 1)
+										{
+											tempLen = noteOffs[l][1] - totalTDelay;
+										}
+
+										tempPos = WriteNoteEventOff(midData, midPos, noteOffs[l][0], curNoteLen, tempLen, firstNote, curTrack, curInst);
+										totalTDelay = noteOffs[l][1];
+										midPos = tempPos;
+										ctrlDelay = noteOffs[l][1];
+										curDelay -= tempLen;
+										firstFlag = 1;
+
+									noteOffs[l][0] = -1;
+									noteOffs[l][1] = -1;
+									noteOffs[l][2] = -1;
+									if (noteOffPos > 0)
+									{
+										noteOffPos--;
+									}
+								}
+							}
+
+							if (firstFlag != 0)
+							{
+								curDelay = tempCtrlDelay - ctrlDelay + patDelay;
+								ctrlDelay = tempCtrlDelay;
+							}
+							firstFlag = 0;
+
+
+
+							patDelay = 0;
+
+
+							if (curTrack == 3 && ctrlDelay >= 200)
+							{
+								curTrack = 3;
+							}
+
+							tempPos = WriteNoteEventOn(midData, midPos, curNote, curNoteLen, curDelay, firstNote, curTrack, curInst);
 							firstNote = 0;
+							midPos = tempPos;
+
+							noteOffs[noteOffPos][0] = curNote;
+							noteOffs[noteOffPos][1] = curNoteLen + ctrlDelay;
+							noteOffs[noteOffPos][2] = curNoteLen;
+							noteOffs[noteOffPos][1] = curNoteLen + ctrlDelay;
+
+
+							noteOffPos++;
+
+							/*
+							tempPos = WriteNoteEventOff(midData, midPos, curNote, curNoteLen, curDelay, firstNote, curTrack, curInst);
 							midPos = tempPos;
 							ctrlDelay += curNoteLen;
 							curDelay = 0;
+							lastTime = tempTime;
+							*/
+							
 							seqPos++;
 
 						}
