@@ -19,6 +19,7 @@ long tablePtrLoc;
 long tableOffset;
 int i, j;
 char outfile[1000000];
+char outfile2[10000000];
 int songNum;
 int numSongs;
 int sampNum;
@@ -866,10 +867,10 @@ void sam2wav(int sampNum, long ptr, long size, int bank, int quality)
 	unsigned char lowNibble = 0;
 	unsigned char highNibble = 0;
 	unsigned static char* rawData;
-	int rawLength = 0x10000;
+	int rawLength = 0x100000;
 
-	sprintf(outfile, "sample%i.wav", sampNum);
-	if ((wav = fopen(outfile, "wb")) == NULL)
+	sprintf(outfile2, "sample%i.wav", sampNum);
+	if ((wav = fopen(outfile2, "wb")) == NULL)
 	{
 		printf("ERROR: Unable to write to file sample%i.wav!\n", sampNum);
 		exit(2);
@@ -878,8 +879,8 @@ void sam2wav(int sampNum, long ptr, long size, int bank, int quality)
 	{
 		/*Copy the sample data's bank (x 2)*/
 		fseek(rom, ((bank - 1) * bankSize), SEEK_SET);
-		exRomData = (unsigned char*)malloc(bankSize * 2);
-		fread(exRomData, 1, bankSize, rom);
+		exRomData = (unsigned char*)malloc(bankSize * 8);
+		fread(exRomData, 1, (bankSize * 8), rom);
 
 		/*Create a storage for the extracted and unpacked sample data*/
 		rawData = (unsigned char*)malloc(rawLength);
