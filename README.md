@@ -43,6 +43,7 @@ Supported games:
   * Mission Bravo
   * MTV Sports: T.J. Lavin's Ultimate BMX
   * The Mummy Returns
+  * Mythri (prototype)
   * Noddy and the Birthday Party
   * Portal Runner
   * Pumuckl's Abenteuer bei den Piraten
@@ -54,7 +55,8 @@ Supported games:
   * Rugrats: Totally Angelica
   * Sabrina: The Animated Series: Spooked!
   * Sabrina: The Animated Series: Zapped!
-  * San Francisco 2049
+  * San Francisco Rush 2049
+  * Shantae (early prototype)
   * Shrek: Fairy Tale Freakdown
   * Star Wars Episode I: Obi-Wan's Adventures
   * Stuart Little: The Journey Home
